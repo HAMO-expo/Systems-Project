@@ -1,0 +1,239 @@
+#include <Wire.h>
+#include <Servo.h>
+#include <LiquidCrystal_I2C.h>
+#include <DS1302.h>
+#include <TimeLib.h>
+
+// RTC DS1302 setup
+DS1302 rtc(A5, A4, A3);  // CLK = A5, DAT = A4, RST = A3
+
+// LCD Setup (I2C address 0x27)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Pin Definitions
+const int speakerPin = 7;
+const int potentiometerPin = A6;
+
+// Optical Sensor Setup
+const int sensorPins[4] = {A0, A1, A2, A3};  // Light sensor pins
+
+// LED Pins
+const int blueLedPin = A8;
+const int greenLedPin = A9;
+const int redLedPin = A10;
+
+// Pill Schedule Arrays
+int pillQuantities[4][4] = { {1, 2, 0, 0}, {0, 1, 1, 1}, {2, 0, 1, 0}, {1, 1, 0, 1} };
+
+// Use tmElements_t to store time values
+tmElements_t scheduleTimes[4];
+
+// Vibration Motor and Servo Setup
+const int vibratoryMotorPins[4] = {22, 24, 26, 28};
+Servo servos[4];
+const int servoPins[4] = {9, 10, 11, 12};  // Servo motor control pins
+
+// Machine State Variables
+bool machineOn = false;
+int menuIndex = 0;
+
+void setup() {
+  Serial.begin(9600);
+
+  // Initialize RTC DS1302
+  rtc.halt(false);
+  rtc.writeProtect(false);
+  
+  // Initialize LEDs
+  pinMode(blueLedPin, OUTPUT);
+  pinMode(greenLedPin, OUTPUT);
+  pinMode(redLedPin, OUTPUT);
+
+  // Initialize LCD
+  lcd.init();
+  lcd.backlight();
+
+  // Initialize servo motors and vibration motors
+  for (int i = 0; i < 4; i++) {
+    pinMode(vibratoryMotorPins[i], OUTPUT);
+    servos[i].attach(servoPins[i]);
+    servos[i].write(0);  // Set all servos to 0 degrees initially
+  }
+
+  // Display Welcome Screen
+  lcd.setCursor(0, 0);
+  lcd.print("Pill Dispenser");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
+  delay(3000);  // Hold the screen for 3 seconds
+  lcd.clear();
+
+  // Setting schedule times (hardcoded for now, adjust as needed)
+  setTimeElement(scheduleTimes[0], 9, 0, 0);   // 9:00 AM
+  setTimeElement(scheduleTimes[1], 12, 0, 0);  // 12:00 PM
+  setTimeElement(scheduleTimes[2], 18, 0, 0);  // 6:00 PM
+  setTimeElement(scheduleTimes[3], 21, 0, 0);  // 9:00 PM
+}
+
+// Helper function to set time
+void setTimeElement(tmElements_t &timeElement, int hour, int minute, int second) {
+  timeElement.Hour = hour;
+  timeElement.Minute = minute;
+  timeElement.Second = second;
+}
+
+void loop() {
+  // Read the potentiometer value for menu navigation
+  int potValue = analogRead(potentiometerPin);
+  menuIndex = map(potValue, 0, 1023, 0, 3);
+
+  // Display menu options
+  displayMenu();
+
+  // Handle pill dispensing if the menu index is 0
+  if (menuIndex == 0) {
+    startDispensing();
+  }
+
+  // Temporary Serial output to display the light sensor values
+  displayLightLevels();
+  delay(1000);  // Update light level display every second
+}
+
+// Function to display the main menu on the LCD
+void displayMenu() {
+  lcd.clear();
+  switch (menuIndex) {
+    case 0:
+      lcd.setCursor(0, 0);
+      lcd.print("> Start Dispensing");
+      break;
+    case 1:
+      lcd.setCursor(0, 0);
+      lcd.print("> View Schedule");
+      break;
+    case 2:
+      lcd.setCursor(0, 0);
+      lcd.print("> Update Quantities");
+      break;
+    case 3:
+      lcd.setCursor(0, 0);
+      lcd.print("> System Settings");
+      break;
+  }
+  delay(500);  // Small delay to reduce flicker
+}
+
+// Function to handle pill dispensing
+void startDispensing() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Dispensing...");
+    tone(speakerPin, 1000, 500);  // Play tone to signal dispensing start
+
+    // Define variables to hold the current time values
+    Time now = rtc.time();  // Get current time from RTC
+
+    int currentHour = now.hr;   // Get current hour
+    int currentMinute = now.min;   // Get current minute
+
+    bool allCriteriaMet = true;
+
+    // Check each scheduled time and dispense accordingly
+    for (int i = 0; i < 4; i++) {
+        if (currentHour == scheduleTimes[i].Hour && currentMinute == scheduleTimes[i].Minute) {
+            bool pillDispensed = dispensePills(i);
+            if (!pillDispensed) {
+                allCriteriaMet = false;
+            }
+        }
+    }
+
+    // Indicate success or failure
+    if (allCriteriaMet) {
+        lcd.setCursor(0, 1);
+        lcd.print("Success!");
+        digitalWrite(greenLedPin, HIGH);  // Success LED
+        tone(speakerPin, 1500, 500);  // Success tone
+        delay(2000);
+        digitalWrite(greenLedPin, LOW);
+    } else {
+        lcd.setCursor(0, 1);
+        lcd.print("Dispense Failed!");
+        digitalWrite(redLedPin, HIGH);  // Fail LED
+        tone(speakerPin, 500, 500);  // Failure tone
+        delay(2000);
+        digitalWrite(redLedPin, LOW);
+    }
+}
+
+// Function to dispense pills
+bool dispensePills(int scheduleIndex) {
+  bool allDispensedCorrectly = true;
+
+  for (int i = 0; i < 4; i++) {
+    int quantity = pillQuantities[i][scheduleIndex];
+    if (quantity > 0) {
+      activateVibrationMotor(i);
+      for (int j = 0; j < quantity; j++) {
+        rotateServo(i);
+        if (!verifyDispense(i)) {
+          allDispensedCorrectly = false;
+        }
+      }
+    }
+  }
+
+  return allDispensedCorrectly;
+}
+
+// Function to activate vibration motor
+void activateVibrationMotor(int motorIndex) {
+  digitalWrite(vibratoryMotorPins[motorIndex], HIGH);
+  delay(500);  // Shake pills for 500 ms
+  digitalWrite(vibratoryMotorPins[motorIndex], LOW);
+}
+
+// Function to rotate servo
+void rotateServo(int servoIndex) {
+  servos[servoIndex].write(90);  // Rotate to 90 degrees
+  delay(1000);  // Wait for pill to fall
+  servos[servoIndex].write(0);   // Return to initial position
+  delay(1000);  // Reset
+}
+
+// Function to verify if the pill was dispensed using the light sensor
+bool verifyDispense(int sensorIndex) {
+  int lightLevelSum = 0;
+  int sampleCount = 10;  // Number of samples to calculate the average
+  int ambientLightLevel;
+
+  // Take multiple readings to calculate the ambient light level
+  for (int i = 0; i < sampleCount; i++) {
+    lightLevelSum += analogRead(sensorPins[sensorIndex]);
+    delay(10);  // Small delay between readings
+  }
+  ambientLightLevel = lightLevelSum / sampleCount;
+
+  int currentLightLevel = analogRead(sensorPins[sensorIndex]);
+  int lightDrop = ambientLightLevel - currentLightLevel;
+
+  // If a significant drop in light is detected, assume a pill was dispensed
+  if (lightDrop > 50 && lightDrop < 100) {  // Adjust the thresholds if needed
+    return true;  // Pill successfully dispensed
+  } else {
+    return false;  // No pill detected
+  }
+}
+
+// Temporary function to display light levels from the sensors in Serial Monitor
+void displayLightLevels() {
+  Serial.print("Sensor 1: ");
+  Serial.print(analogRead(sensorPins[0]));
+  Serial.print("\tSensor 2: ");
+  Serial.print(analogRead(sensorPins[1]));
+  Serial.print("\tSensor 3: ");
+  Serial.print(analogRead(sensorPins[2]));
+  Serial.print("\tSensor 4: ");
+  Serial.println(analogRead(sensorPins[3]));
+}
